@@ -47,7 +47,7 @@ class OrderSchema(SoftDeletionSchema):
 
     id = fields.Str(dump_only=True)
     identifier = fields.Str(dump_only=True)
-    amount = fields.Float(validate=lambda n: n > 0, allow_none=True)
+    amount = fields.Float(validate=lambda n: n >= 0, allow_none=False, default=0)
     address = fields.Str(allow_none=True)
     city = fields.Str(allow_none=True)
     state = fields.Str(db.String, allow_none=True)
@@ -60,14 +60,19 @@ class OrderSchema(SoftDeletionSchema):
     transaction_id = fields.Str(dump_only=True)
     payment_mode = fields.Str(
                             default="free",
-                            validate=validate.OneOf(choices=["free", "stripe", "paypal", "bank", "cheque", "onsite"]),
+                            validate=validate.OneOf(choices=["free", "stripe", "paypal", "bank",
+                                                             "cheque", "onsite", "omise", "alipay", "paytm"]),
                             allow_none=True)
     paid_via = fields.Str(dump_only=True)
+    is_billing_enabled = fields.Boolean(default=False)
     brand = fields.Str(dump_only=True)
     exp_month = fields.Str(dump_only=True)
     exp_year = fields.Str(dump_only=True)
     last4 = fields.Str(dump_only=True)
-    status = fields.Str(validate=validate.OneOf(choices=["pending", "cancelled", "completed", "placed", "expired"]))
+    status = fields.Str(
+        validate=validate.OneOf(
+            choices=["initializing", "pending", "cancelled", "completed", "placed", "expired"]
+        ))
     discount_code_id = fields.Str(allow_none=True)
     payment_url = fields.Str(dump_only=True)
     cancel_note = fields.Str(allow_none=True)
@@ -110,6 +115,14 @@ class OrderSchema(SoftDeletionSchema):
                          related_view_kwargs={'id': '<event_id>'},
                          schema='EventSchemaPublic',
                          type_="event")
+
+    event_invoice = Relationship(attribute='invoice',
+                                 self_view='v1.order_invoice',
+                                 self_view_kwargs={'order_identifier': '<identifier>'},
+                                 related_view='v1.event_invoice_detail',
+                                 related_view_kwargs={'id': '<id>'},
+                                 schema='EventInvoiceSchema',
+                                 type_="event_invoice")
 
     marketer = Relationship(attribute='marketer',
                             self_view='v1.order_marketer',

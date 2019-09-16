@@ -1,9 +1,10 @@
 from flask import request
+from flask_login import current_user
 from flask_rest_jsonapi import ResourceDetail, ResourceList, ResourceRelationship
 from flask_rest_jsonapi.exceptions import ObjectNotFound
 
 from app.api.bootstrap import api
-from app.api.helpers.db import safe_query, get_count
+from app.api.helpers.db import safe_query, get_count, save_to_db
 from app.api.helpers.exceptions import ForbiddenException
 from app.api.helpers.permission_manager import has_access
 from app.api.helpers.query import event_query
@@ -13,6 +14,7 @@ from app.models import db
 from app.models.event import Event
 from app.models.session import Session
 from app.models.speaker import Speaker
+from app.models.session_speaker_link import SessionsSpeakersLink
 from app.models.user import User
 
 
@@ -40,9 +42,17 @@ class SpeakerListPost(ResourceList):
         if get_count(db.session.query(Event).filter_by(id=int(data['event']), is_sessions_speakers_enabled=False)) > 0:
             raise ForbiddenException({'pointer': ''}, "Speakers are disabled for this Event")
 
-        if get_count(db.session.query(Speaker).filter_by(event_id=int(data['event']), email=data['email'],
-                                                         deleted_at=None)) > 0:
+        if not data.get('is_email_overridden') and \
+            get_count(db.session.query(Speaker).filter_by(event_id=int(data['event']), email=data['email'],
+                                                          deleted_at=None)) > 0:
             raise ForbiddenException({'pointer': ''}, 'Speaker with this Email ID already exists')
+
+        if data.get('is_email_overriden') and not has_access('is_organizer', event_id=data['event']):
+            raise ForbiddenException({'pointer': 'data/attributes/is_email_overriden'},
+                                     'Organizer access required to override email')
+        elif data.get('is_email_overriden') and has_access('is_organizer', event_id=data['event']) and \
+                not data.get('email'):
+            data['email'] = current_user.email
 
         if 'sessions' in data:
             session_ids = data['sessions']
@@ -114,7 +124,6 @@ class SpeakerDetail(ResourceDetail):
     """
     Speakers Detail by id
     """
-
     def before_update_object(self, speaker, data, view_kwargs):
         """
         method to save image urls before updating speaker object
@@ -123,11 +132,38 @@ class SpeakerDetail(ResourceDetail):
         :param view_kwargs:
         :return:
         """
-
         if data.get('photo_url') and data['photo_url'] != speaker.photo_url:
             start_image_resizing_tasks(speaker, data['photo_url'])
 
-    decorators = (api.has_permission('is_coorganizer_or_user_itself', methods="PATCH,DELETE", fetch="event_id",
+        if data.get('is_email_overriden') and not has_access('is_organizer', event_id=speaker.event_id):
+            raise ForbiddenException({'pointer': 'data/attributes/is_email_overriden'},
+                                     'Organizer access required to override email')
+        elif data.get('is_email_overriden') and has_access('is_organizer', event_id=speaker.event_id) and \
+                not data.get('email'):
+            data['email'] = current_user.email
+
+    def after_patch(self, result):
+        """
+        method to create session speaker link
+        :param result:
+        """
+        # This method is executed when a new speaker is created
+        # and added to an existing session
+        speaker_id = result['data']['id']
+        speaker = Speaker.query.filter_by(id=speaker_id).first()
+        if SessionsSpeakersLink.query.filter_by(speaker_id=speaker_id).count() == 0:
+            all_sessions = Session.query.filter_by(deleted_at=None)
+            for session in all_sessions:
+                if speaker in session.speakers:
+                    session_speaker_link = SessionsSpeakersLink(session_state=session.state,
+                                                                session_id=session.id,
+                                                                event_id=session.event.id,
+                                                                speaker_id=speaker.id)
+                    save_to_db(session_speaker_link, "Session Speaker Link Saved")
+
+    decorators = (api.has_permission('is_speaker_itself_or_admin', methods="PATCH,DELETE", fetch="event_id",
+                                     fetch_as="event_id", model=Speaker),
+                  api.has_permission('is_coorganizer_or_user_itself', methods="PATCH,DELETE", fetch="event_id",
                                      fetch_as="event_id", model=Speaker),)
     schema = SpeakerSchema
     data_layer = {'session': db.session,

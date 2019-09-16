@@ -1,7 +1,7 @@
 import base64
 
 from flask import Blueprint, request, jsonify, abort, make_response
-from flask_jwt import current_identity as current_user
+from flask_jwt_extended import current_user, verify_fresh_jwt_in_request
 from flask_rest_jsonapi import ResourceDetail, ResourceList, ResourceRelationship
 from sqlalchemy.orm.exc import NoResultFound
 import urllib.error
@@ -14,6 +14,7 @@ from app.api.helpers.files import create_save_image_sizes, make_frontend_url
 from app.api.helpers.mail import send_email_confirmation, send_email_change_user_email, send_email_with_action
 from app.api.helpers.permission_manager import has_access
 from app.api.helpers.permissions import is_user_itself
+from app.api.helpers.user import modify_email_for_user_to_be_deleted, modify_email_for_user_to_be_restored
 from app.api.helpers.utilities import get_serializer, str_generator
 from app.api.schema.users import UserSchema, UserSchemaPublic
 from app.models import db
@@ -21,6 +22,7 @@ from app.models.access_code import AccessCode
 from app.models.discount_code import DiscountCode
 from app.models.email_notification import EmailNotification
 from app.models.event_invoice import EventInvoice
+from app.models.event import Event
 from app.models.feedback import Feedback
 from app.models.mail import USER_REGISTER_WITH_PASSWORD, PASSWORD_RESET_AND_VERIFY
 from app.models.notification import Notification
@@ -49,7 +51,7 @@ class UserList(ResourceList):
         if len(data['password']) < 8:
             raise UnprocessableEntity({'source': '/data/attributes/password'},
                                        'Password should be at least 8 characters long')
-        if db.session.query(User.id).filter_by(email=data['email']).scalar() is not None:
+        if db.session.query(User.id).filter_by(email=data['email'].strip()).scalar() is not None:
             raise ConflictException({'pointer': '/data/attributes/email'}, "Email already exists")
 
     def after_create_object(self, user, data, view_kwargs):
@@ -87,6 +89,9 @@ class UserList(ResourceList):
         #     del uploaded_images['large_image_url']
         #     self.session.query(User).filter_by(id=user.id).update(uploaded_images)
 
+        if data.get('avatar_url'):
+            start_image_resizing_tasks(user, data['avatar_url'])
+
     decorators = (api.has_permission('is_admin', methods="GET"),)
     schema = UserSchema
     data_layer = {'session': db.session,
@@ -103,7 +108,6 @@ class UserDetail(ResourceDetail):
     """
 
     def before_get(self, args, kwargs):
-
         if current_user.is_admin or current_user.is_super_admin or current_user:
             self.schema = UserSchema
         else:
@@ -147,6 +151,14 @@ class UserDetail(ResourceDetail):
             else:
                 view_kwargs['id'] = None
 
+        if view_kwargs.get('event_invoice_identifier') is not None:
+            event_invoice = safe_query(self, EventInvoice, 'identifier', view_kwargs['event_invoice_identifier'],
+                                       'event_invoice_identifier')
+            if event_invoice.user_id is not None:
+                view_kwargs['id'] = event_invoice.user_id
+            else:
+                view_kwargs['id'] = None
+
         if view_kwargs.get('users_events_role_id') is not None:
             users_events_role = safe_query(self, UsersEventsRoles, 'id', view_kwargs['users_events_role_id'],
                                            'users_events_role_id')
@@ -173,6 +185,13 @@ class UserDetail(ResourceDetail):
             access_code = safe_query(self, AccessCode, 'id', view_kwargs['access_code_id'], 'access_code_id')
             if access_code.marketer_id is not None:
                 view_kwargs['id'] = access_code.marketer_id
+            else:
+                view_kwargs['id'] = None
+
+        if view_kwargs.get('event_id') is not None:
+            event = safe_query(self, Event, 'id', view_kwargs['event_id'], 'event_id')
+            if event.owner is not None:
+                view_kwargs['id'] = event.owner.id
             else:
                 view_kwargs['id'] = None
 
@@ -205,10 +224,31 @@ class UserDetail(ResourceDetail):
         #     data['thumbnail_image_url'] = uploaded_images['thumbnail_image_url']
         #     data['icon_image_url'] = uploaded_images['icon_image_url']
 
-        if data.get('email') and data['email'] != user.email:
+        if data.get('deleted_at') != user.deleted_at:
+            if has_access('is_user_itself', user_id=user.id) or has_access('is_admin'):
+                if data.get('deleted_at'):
+                    if len(user.events) != 0:
+                        raise ForbiddenException({'source': ''}, "Users associated with events cannot be deleted")
+                    elif len(user.orders) != 0:
+                        raise ForbiddenException({'source': ''}, "Users associated with orders cannot be deleted")
+                    else:
+                        modify_email_for_user_to_be_deleted(user)
+                else:
+                    modify_email_for_user_to_be_restored(user)
+                    data['email'] = user.email
+                user.deleted_at = data.get('deleted_at')
+            else:
+                raise ForbiddenException({'source': ''}, "You are not authorized to update this information.")
+
+        users_email = data.get('email', None)
+        if users_email is not None:
+            users_email = users_email.strip()
+
+        if users_email is not None and users_email != user.email:
             try:
-                db.session.query(User).filter_by(email=data['email']).one()
+                db.session.query(User).filter_by(email=users_email).one()
             except NoResultFound:
+                verify_fresh_jwt_in_request()
                 view_kwargs['email_changed'] = user.email
             else:
                 raise ConflictException({'pointer': '/data/attributes/email'}, "Email already exists")
@@ -216,11 +256,14 @@ class UserDetail(ResourceDetail):
         if has_access('is_super_admin') and data.get('is_admin') and data.get('is_admin') != user.is_admin:
             user.is_admin = not user.is_admin
 
-        if has_access('is_admin') and data.get('is_sales_admin') != user.is_sales_admin:
+        if has_access('is_admin') and ('is_sales_admin' in data) and data.get('is_sales_admin') != user.is_sales_admin:
             user.is_sales_admin = not user.is_sales_admin
 
-        if has_access('is_admin') and data.get('is_marketer') != user.is_marketer:
+        if has_access('is_admin') and ('us_marketer' in data) and data.get('is_marketer') != user.is_marketer:
             user.is_marketer = not user.is_marketer
+
+        if data.get('avatar_url'):
+            start_image_resizing_tasks(user, data['avatar_url'])
 
     def after_update_object(self, user, data, view_kwargs):
         """
@@ -275,3 +318,9 @@ def is_email_available():
         abort(
             make_response(jsonify(error="Email field missing"), 422)
         )
+
+
+def start_image_resizing_tasks(user, original_image_url):
+    user_id = str(user.id)
+    from .helpers.tasks import resize_user_images_task
+    resize_user_images_task.delay(user_id, original_image_url)

@@ -10,6 +10,7 @@ from app.api.data_layers.NoModelLayer import NoModelLayer
 from app.models.event import Event
 from app.models.users_events_role import UsersEventsRoles
 from app.models.role import Role
+from app.models.ticket_holder import TicketHolder
 from app.api.helpers.db import get_count
 
 class AdminStatisticsUserSchema(Schema):
@@ -29,6 +30,7 @@ class AdminStatisticsUserSchema(Schema):
     admin = fields.Method("admin_count")
     verified = fields.Method("verified_count")
     unverified = fields.Method("unverified_count")
+    owner = fields.Method("owner_count")
     organizer = fields.Method("organizer_count")
     coorganizer = fields.Method("coorganizer_count")
     attendee = fields.Method("attendee_count")
@@ -52,6 +54,9 @@ class AdminStatisticsUserSchema(Schema):
             UsersEventsRoles.role == role).distinct()
         return newquery
 
+    def owner_count(self, obj):
+        return self.get_all_user_roles('owner').count()
+
     def organizer_count(self, obj):
         return self.get_all_user_roles('organizer').count()
 
@@ -62,7 +67,8 @@ class AdminStatisticsUserSchema(Schema):
         return self.get_all_user_roles('track_organizer').count()
 
     def attendee_count(self, obj):
-        return self.get_all_user_roles('attendee').count()
+        unique_attendee_query = db.session.query(TicketHolder.email).distinct()
+        return unique_attendee_query.count()
 
 
 class AdminStatisticsUserDetail(ResourceDetail):

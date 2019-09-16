@@ -70,7 +70,7 @@ from app.factories.user_favourite_events import UserFavouriteEventFactory
 stash = {}
 api_username = "open_event_test_user@fossasia.org"
 api_password = "fossasia"
-api_uri = "http://localhost:5000/auth/session"
+api_uri = "http://localhost:5000/v1/auth/login"
 
 
 def obtain_token():
@@ -130,9 +130,11 @@ def after_each(transaction):
 
 # ------------------------- Authentication -------------------------
 @hooks.before("Authentication > JWT Authentication > Authenticate and generate token")
+@hooks.before("Authentication > JWT Authentication > Authenticate with remember me")
+@hooks.before("Authentication > JWT Authentication > Authenticate with remember me for mobile")
 def skip_auth(transaction):
     """
-    POST /auth/session
+    POST /v1/auth/login
     :param transaction:
     :return:
     """
@@ -143,6 +145,17 @@ def skip_auth(transaction):
         db.session.commit()
         print('User Created')
 
+
+@hooks.before("Authentication > Re-Authentication > Generate fresh token")
+@hooks.before("Authentication > Token Refresh > Access Token Refresh for Web")
+@hooks.before("Authentication > Token Refresh > Access Token Refresh for mobile")
+def skip_token_refresh(transaction):
+    """
+    POST /v1/auth/token/refresh
+    :param transaction:
+    :return:
+    """
+    transaction['skip'] = True
 
 # ------------------------- Users -------------------------
 @hooks.before("Users > Users Collection > List All Users")
@@ -734,8 +747,8 @@ def feedback_post(transaction):
     :return:
     """
     with stash['app'].app_context():
-        event = EventFactoryBasic()
-        db.session.add(event)
+        session = SessionFactory()
+        db.session.add(session)
         db.session.commit()
 
 
@@ -2804,7 +2817,7 @@ def discount_delete(transaction):
 @hooks.before("Discount Codes > Get Discount Code Detail using the code > Get Discount Code Detail")
 def discount_code_get_detail_using_code(transaction):
     """
-    GET /discount-codes/DC101
+    GET events/1/discount-codes/DC101
     :param transaction:
     :return:
     """
@@ -2815,6 +2828,7 @@ def discount_code_get_detail_using_code(transaction):
 
         discount_code = DiscountCodeFactory(event_id=1)
         discount_code.code = 'DC101'
+        discount_code.event_id = 1
         db.session.add(discount_code)
         db.session.commit()
 
@@ -2940,11 +2954,15 @@ def access_code_delete(transaction):
 @hooks.before("Access Codes > Access Code Detail using the Code > Access Code Detail")
 def access_code_get_detail_using_code(transaction):
     """
-    GET /access-codes/AC101
+    GET events/1/access-codes/AC101
     :param transaction:
     :return:
     """
     with stash['app'].app_context():
+        event = EventFactoryBasic()
+        db.session.add(event)
+        db.session.commit()
+
         access_code = AccessCodeFactory()
         access_code.code = 'AC101'
         db.session.add(access_code)
@@ -4358,8 +4376,8 @@ def favourite_events_list_post(transaction):
     :return:
     """
     with stash['app'].app_context():
-        user_fav_event = UserFavouriteEventFactory()
-        db.session.add(user_fav_event)
+        event = EventFactoryBasic()
+        db.session.add(event)
         db.session.commit()
 
 
